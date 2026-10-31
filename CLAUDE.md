@@ -1,110 +1,18 @@
-This repository contains tools to deal with data by Time Atlas app.
+# Time Atlas tools
 
-App stores it files in iCloud, in a folder that can be accessed on Mac from $HOME/Library/Mobile Documents/iCloud~com~timeatlaslabs~Pat/Documents/. On windows it is in "C:\Users\YourUsername\iCloudDrive", if user has iCloud installed.
+This project is implemented in Swift. The user's requested Python-to-Swift
+migration supersedes the historical Python implementation described in earlier
+versions of this document.
 
-This folder contains a FORMAT.txt and timeline.proto which explain the data model which is based on files containing protobuffer message FullDirectory.
-
-#1 Basic setup
-
-Generate python protobuffer code for the timeline.proto and store in this repository.
-
-#2 Database schema
-
-For each type of message in FullDirectory, such as event, media or known place, create its own table which has an primary key id (string) and a data column as blob. Each protobuffer message would be then inserted as-is to the table to id corresponding to message.meta.id.
-
-For each event type, create a own table like events_place_visits, events_movements, and do not create a events table. Store the whole event message, but choose the table based on the event type.
-
-In addition, study the protobuffer definition and create a column for each timestamp field, and store the unix timestamp in there. For example, meta.created_at of each message, and start_at and end_at of the Event message. Have indices for the event start_at and end_at.
-
-For all the tables, create columns for all simple fields of the event submessage, like event.place_visit would have "name", "secondary_name" and "known_place_id". Do not create columns for repeated fields or structure typed fields.
-
-For the repeated fields, create many-to-many tables. For example, journal entry has mediaIDs, so create journal_entry_media_ids table with journal_entry_id and media_id as columns. For journal entry tags, or people, do the same. (Ignore the local photo ids, as it is a deprecated field).
-
-Furthermore, for events, make a column for event_type, which is a string based on the enum name for the event type. This is to make it easier to read.
-
-Messages which have meta.deleted_at should be deleted from the database.
-
-#2 Database sync
-
-Create a script sync.py which creates an SQLite3 database "timeatlas.db" unless it exists, using the schema defined above. Create an additional sync state table that contains list of already synchronized prefixes. The prefixes are unix timestamps in second and the files the icloud folder have that prefix.
-
-Then create a sync function which loads the files that are not imported yet from the icloud folder. Note that some files are zip files that contain protobufferfiles inside. Open the zip files in-memory (i.e do not extract on the file system).
-
-#3 Startup instructions
-
-Modify README.md to have instructions how to run sync.py, including setting up virtual environment and installing dependencies.
-
-#4 Python tools
-
-Let's write some python tools, place them in directory tools. Before that, let's specify some helper functions that would be a shared timeatlas.py module:
-
-- getDatabasePath() -- returns path to the timeatlas.db
-- getDateDateRange(date) which loads from database a date event with the date (format YYYY-mm-dd), checks its start and end times and returns a tuple of datetime objects (start-datetime, end-datetime) corresponding to those times. The date times should have correct timezone based on the utcOffset.
-- getDates(from, to) would return all dates withing the range and list of tuple (date-string yyyy-mm-dd, start-datetime, end-datetime)
-- getEvents(type, from-datetime, to-datetime) would load events of type (such as "placevisit", "movement") from the correct table whose start-time-end-time overlaps with the given query. Sort by start time ascending. The events would be the protobuffer messages stored in db.
-- getKnownPlace(id) returns the known place with the given id, i.e the protobuffer message.
-- getKnownPlace(name) returns the list of known places with the given name, i.e the protobuffer message.
-
-Then create following tools:
-
-- date_query.py which takes a range of dates (or just one date) and prints their events in a nice grouped manner.
-- knownplaces.py which takes a known place name and for each known place with the name prints their address and lists all place visit events to the known place (query by placevisit known-place-id)
-
-#4.1 Inserts
-
-Add a function to timeatlas.py to insert objects to the database. For now, let's add insertTallies() and insertBooks() and insertMoviesAndTvs(). They would take as parameter list of the appropriate protobuffers, and add to each of them add meta field with id as a random UUID, and then populate creation time and update time to be the curren time. Then it would create a FullDirectory protobuffer with the right field populated, and create a file into the sync directory with name unix-timestamp-in-milliseconds + "\_update.pb".
-
-For tallies, add a validation function which is called before inserting, and if it fails, it will throw exception. The validation logic in go is in data/tallyvalid.go, write it in python.
-
-Then create a python tool in tools/ to insert a tally, named "insert_log.py", which will takes a command line the tally name, unit, value, who (optional) and date (by default today). And then it will get the date event id and set that as eventID (and throw error if not found).
-
-For books and moviesAndTv have similar validation: they must set the name/title, and rating must be between 1..5 or not set (0).
-
-#4.2 Updates
-
-Then add a function to do updates, it would take a list of objects, and based on their type put them into the field in a FullDirectory message, and insert that full directory proto similarly as in inserts to a file. It should check all objects have a meta set.
-
-Then create a tool tools/activity_replace.py which interactively asks from which activity to which activity to change, giving a list of activities as in timeatlas.py ACTIVITY_NAMES to choose from interactively. Before this, it would ask the date range to apply. Then it would load all move events from the date range, and change all activities inside the moveActivities as requested by user. Then user would be asked to confirm before creating the update by passing all the changed move events (only changed ones). In confirmation, it should mention that how many activities are change (total distance as well).
-
-#5 Python Tools -- additional features
-
-For both date_query.py and knownplaces.py, add a flag "--show-notes" to include notes as well. This means loading journal entry's for each event ID encountered (date events, place visits). If there is no note for an event, do not show anything.
-
-In date_query.py, show the distances and non-zero steps for all movement activities.
-Do not print sleeps in details. Instead, at the end print the daily total of sleep in hours and minutes.
-Also print the total distance, duration and steps for each activity (wlk, run, etc...). Add a flag "--no-summary" to prevent showing the total details.
-
-#6 More tools: GeoJSON
-
-Add a tool geojson.py, which takes a date range and outputs the events (place visits and movement activity trajectories) in GeoJSON format. Each place visit or movement activity is a "Feature" in GeoJSON. For GeoJSON, add to the properties activity type for movements and place name for place visits. In addition, add the start time in ISO8601 format to the feature for both types.
-
-For activities, add a "stroke" property with a hex color for different activity types. Read in code the activity types from data/activity_colors.json (map activity-type: color in hex), and use that, by using "trp" color if not found.
-
-Add a flag to filter by activity, --activity, accept both short name like "ski" and full name like "cycling". When filtering by activity, do not includes places.
-
-Add a flag for the output file, otherwise print in stdout the json.
-
-#7 More tools: Adding notes
-
-Add a tool addnote.json which either takes an input file (given with -f or --file) or adds a prompt to enter text (two empty lines finishes a note). With -w open a window to enter a text.
-
-After user has finished with the text, or it was provided as an input file, create a JSON file with structure:
-{ "text": text,
-"source": "user:oss",
-"timestamp": iso8601-formatter current timestamp
-"date": date in yyyy-mm-dd,
-}
-
-The date is the current date or user can pass a flag -d to specify date.
-
-The file should be stored with name "note\_<timestamp-in-millis>.json" to the icloud directory.
-
-#8 More tools: Weather
-
-Add a tool tools/weather.py to query the weather table. Given a date range, print the temperature range and conditions for each date and in the summary write a simple histogram.
-
-If user specifies -v, use matplotlib to plot the weather and open it in a window or store in a file (flag).
-
-#9 Tools to README.md
-
-Add instructions on how to use the tools to the README.md by providing examples.
+- Build with `swift build`; run `swift run timeatlas --help`.
+- Validate with `swift run timeatlas-checks`. Checks use temporary fixtures.
+- `Sources/TimeAtlas` contains the reusable library and generated protobuf models.
+- `Sources/TimeAtlasCLI` contains the command-line tools, native weather plotting,
+  and the Photos usage-description plist.
+- `timeatlas.proto` is the source for generated models. Regenerate
+  `Sources/TimeAtlas/timeatlas.pb.swift` with SwiftProtobuf 1.31.0 after edits.
+- Preserve SQLite table/column names and protobuf field numbers for compatibility.
+- Sync each input file transactionally, including all protobuf members of a ZIP.
+- Exercise write operations against a temporary directory during development;
+  real application data lives in the configured iCloud folder.
+- Keep README command examples and migration notes current.

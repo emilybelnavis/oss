@@ -1,195 +1,142 @@
-This repository contains open source tools to access data from the Time Atlas app.
+# Time Atlas tools (Swift)
 
-# Accessing data of the Time Atlas app
-Time Atlas stores its data for syncing in iCloud, see `Library/Mobile Documents/iCloud~com~timeatlaslabs~Pat/Documents/` on your Apple Mac computer. On Windows the folder lives under `%USERPROFILE%\iCloudDrive\iCloud~com~timeatlaslabs~Pat\Documents`.
+Native macOS tools for reading Time Atlas iCloud data, syncing it into SQLite,
+querying your timeline, and writing notes, tallies, and updates back to the app.
+All runtime code is Swift. Requires macOS 13+ and Swift 5.10+ (Xcode or Apple's
+Command Line Tools). SQLite, Photos, and AppKit come with macOS.
 
-# About the Code
-The code has been developed in an AI-driven manner with the Claude Code, see CLAUDE.md for its instructions.
+## Build and run
 
-We encourage users to "vibe code" their own tools. Please submit pull requests for improvements and cool tools!
-
-Join our Discord channel: https://discord.gg/zwJEYNdsPE
-
-# Getting started
-
-## 1. Create and activate a virtual environment
-
-macOS / Linux:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+```sh
+swift build -c release
+swift run timeatlas-checks
+swift run timeatlas sync
 ```
 
-Windows (PowerShell):
+Swift Package Manager downloads the pinned Apple SwiftProtobuf dependency on the
+first build. The generated protobuf models are checked in; protoc is only needed
+when changing the schema.
 
-```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
+The default database is `timeatlas.db` in the source checkout. The default iCloud
+folder is `~/Library/Mobile Documents/iCloud~com~timeatlaslabs~Pat/Documents`.
+The existing Python-created SQLite database and iCloud protobuf files are
+compatible, so no data migration is required. Sync imports `.pb` files and `.pb`
+members of ZIP archives in filename order, skipping `ip`-prefixed files and files
+already recorded in `sync_state`. ZIP members stream into memory without being
+extracted to disk. Each complete input file is committed in a single transaction.
+
+Override paths with `--database PATH` and `--icloud-dir PATH` after the command,
+or with `TIMEATLAS_DB` and `TIMEATLAS_ICLOUD_DIR`. For a binary copied outside this
+checkout, set `TIMEATLAS_DB` explicitly. Keep the generated
+`TimeAtlasTools_TimeAtlas.bundle` alongside the binary for activity colors.
+
+```sh
+swift run timeatlas sync --database /tmp/example.db --icloud-dir /path/to/export
+# Removes the selected database and rebuilds it from the selected sync folder:
+swift run timeatlas sync --reset
 ```
 
-## 2. Install dependencies
+Run sync before using the query tools. Writes create files for the Time Atlas app
+to ingest; run sync again to import protobuf updates into the local database.
+Note JSON is consumed by the Time Atlas app, not by this SQLite sync tool.
 
-```bash
-pip install -r requirements.txt
+## Commands
+
+```sh
+# Events, distances, steps, sleep totals, books, watched media, Last.fm tracks.
+swift run timeatlas date-query 2026-04-20
+swift run timeatlas date-query 2026-04-01 2026-04-07 --show-notes
+swift run timeatlas date-query 2026-04-20 --no-summary
+
+# Exact known-place name, addresses, and visits.
+swift run timeatlas knownplaces "Starbucks"
+swift run timeatlas knownplaces "Gym" --show-notes
+
+# Points for visits and colored LineStrings for movement trajectories.
+swift run timeatlas geojson 2026-04-20
+swift run timeatlas geojson 2026-04-01 2026-04-07 -o april.geojson
+swift run timeatlas geojson 2026-04-01 2026-04-07 --activity cycling -o rides.geojson
+swift run timeatlas geojson 2026-04-20 --activity wlk
+
+# Note entry: two empty lines or EOF ends interactive input.
+swift run timeatlas addnote
+swift run timeatlas addnote -f note.txt -d 2026-04-15
+EDITOR=vi swift run timeatlas addnote -w
+
+# Tallies require a synced date event. Name and unit must be lowercase.
+swift run timeatlas insert-log water 200 ml
+swift run timeatlas insert-log wine 2 glass --category white
+swift run timeatlas insert-log weight 4.3 kg --who baby --date 2026-04-20
+
+# Prompts for date range, source/target activities, and confirmation.
+swift run timeatlas activity-replace
+
+# Weather ranges and condition histogram; native PNG/PDF plotting.
+swift run timeatlas weather 2026-04-01 2026-04-07
+swift run timeatlas weather 2026-04-01 2026-04-07 -v
+swift run timeatlas weather 2026-04-01 2026-04-07 -v -o april-weather.png
+swift run timeatlas weather 2026-04-01 2026-04-07 -v -o april-weather.pdf
+
+# Notes plus matched Apple Photos assets.
+swift run timeatlas get-notes-with-photos 2026-04-20
 ```
 
-## 3. Run sync.py to create the database and sync from iCloud
+Underscore command names such as `date_query` and `insert_log` are accepted as
+aliases. `timeatlas --help` lists every command and its options.
 
-```bash
-python sync.py
+Weather plotting uses AppKit instead of matplotlib. With `-v` and no `-o`, a
+temporary PNG opens in the default viewer. Output supports PNG and PDF.
+
+Photo lookup uses Apple's Photos framework instead of osxphotos. The first photo
+lookup requests permission; the CLI embeds a Photos usage description. Assets
+match by original filename, with modified time (within two seconds) resolving
+ambiguities. Matched originals are exported to a temporary folder and opened in
+the default viewer. iCloud-only originals may download. Photo access and launching
+viewers require an interactive macOS session. Other commands do not request Photos
+access. This Swift port targets macOS; the original Windows support is not retained.
+
+## Library
+
+`Sources/TimeAtlas` is a reusable library with public generated protobuf models.
+`TimeAtlas` exposes the original helper operations as throwing Swift methods:
+`getDates`, `getDateDateRange`, `getDateEvent`, `getEvents`, `getKnownPlace(id:)`,
+`getKnownPlace(name:)`, `getJournalEntriesForEvent`, `getMediaForJournalEntry`,
+`getBooks`, `getMoviesAndTv`, `getLastFmTracks`, `insertTallies`, `insertBooks`,
+`insertMoviesAndTvs`, and `updateObjects` (including mixed message types).
+`AtlasPaths` selects paths. `OffsetDate` retains both an absolute `Date` and its
+stored UTC offset. Insert/update methods return the path of the written file.
+Connections are intended for serial use. Validation errors are thrown before
+writing files. Existing IDs and unknown protobuf fields survive updates.
+
+```swift
+import TimeAtlas
+
+let atlas = TimeAtlas()
+let days = try atlas.getDates("2026-04-01", "2026-04-07")
+if let start = days.first?.start, let end = days.last?.end {
+    let movements = try atlas.getEvents("movement", start.date, end.date)
+    print(movements.count)
+}
 ```
 
-This creates `timeatlas.db` in the repository root and imports any Time Atlas files
-that have not been synced yet. Re-run it at any time to pick up new data.
+## Changing protobuf models
 
-# Tools
+Install Google's `protoc` and Apple's `protoc-gen-swift` version 1.31.0, then run:
 
-The `tools/` directory contains small scripts that read the synced database.
-
-Note: always run "sync.py" first to sync the data. Consider adding this to an automatically running cronjob
-to ensure your data is always in sync.
-
-## date_query.py
-
-List events for a date or a range of dates, grouped by date. Sleeps are summarised
-at the bottom of each day instead of listed inline; movement events include per-
-activity distances and non-zero step counts. Books finished, movies/TV watched and
-Last.fm tracks played on the day are listed too (with `--show-notes` book and
-movie reviews are shown as well).
-
-```bash
-# Single day.
-python tools/date_query.py 2026-04-20
-
-# Range (inclusive).
-python tools/date_query.py 2026-04-01 2026-04-07
-
-# Include journal entry notes attached to the date event and to place visits.
-python tools/date_query.py 2026-04-20 --show-notes
-
-# Hide the end-of-day totals (sleep, distance per activity).
-python tools/date_query.py 2026-04-20 --no-summary
+```sh
+protoc -I . --swift_out=Sources/TimeAtlas --swift_opt=Visibility=Public timeatlas.proto
 ```
 
-## knownplaces.py
+The generator and runtime must use matching SwiftProtobuf versions. Follow the
+[official SwiftProtobuf generator instructions](https://github.com/apple/swift-protobuf/blob/1.31.0/Documentation/PLUGIN.md).
+When changing fields, also update `Schema.swift` mappings and `EnumNames.swift`.
 
-For each known place with the given name, print its address/location and every
-place-visit event tied to it.
+## Tests
 
-```bash
-python tools/knownplaces.py "Starbucks"
+The checks executable needs no XCTest installation and uses temporary databases and sync folders. Coverage includes protobuf
+round trips, SQLite queries, offsets, relationships, deletion and event type
+changes, ZIP import and rollback/retry, GeoJSON, validation, inserts, updates, and
+note JSON. Tests do not read personal iCloud data or request photo access.
 
-# Include any journal entries attached to each place visit.
-python tools/knownplaces.py "Gym" --show-notes
-```
-
-## geojson.py
-
-Export place visits (Point features) and movement trajectories (LineString
-features) for a date range as GeoJSON. Each feature carries the start time in
-ISO8601; place visits get the place name, movement trajectories get the
-activity type.
-
-```bash
-# Single day, printed to stdout.
-python tools/geojson.py 2026-04-20
-
-# Inclusive date range, printed to stdout.
-python tools/geojson.py 2026-04-01 2026-04-07
-
-# Write a whole week to a file (loadable in https://geojson.io).
-python tools/geojson.py 2026-04-01 2026-04-07 -o april.geojson
-
-# Filter by activity (short code). Place visits are excluded.
-python tools/geojson.py 2025-01-15 --activity ski
-
-# Filter by activity (full name) and write to a file.
-python tools/geojson.py 2025-01-10 2025-01-20 --activity cycling -o rides.geojson
-
-# Filter walks for a single day.
-python tools/geojson.py 2025-03-01 --activity wlk
-```
-
-## addnote.py
-
-Capture a note and write it as `note_<timestamp-in-millis>.json` directly into
-the Time Atlas iCloud directory so the app picks it up on its next sync.
-
-```bash
-# Interactive: type the note, finish with two empty lines.
-python tools/addnote.py
-
-# Read the note body from a file.
-python tools/addnote.py -f note.txt
-
-# Open $EDITOR (or vi / notepad) in a window to compose the note.
-python tools/addnote.py -w
-
-# Attach the note to a specific date instead of today.
-python tools/addnote.py -d 2026-04-15 -f note.txt
-```
-
-## insert_log.py
-
-Insert a tally (log entry) into Time Atlas. The entry is written as a protobuf
-file into the iCloud directory so the app picks it up on its next sync.
-
-```bash
-# Log 200 ml of water for today.
-python tools/insert_log.py water 200 ml
-
-# Log with a category.
-python tools/insert_log.py wine 2 glass --category white
-
-# Log for a specific date and person.
-python tools/insert_log.py weight 4.3 kg --who baby --date 2026-04-20
-```
-
-## activity_replace.py
-
-Interactively replace one activity type with another across a date range. The
-tool presents a numbered list of activities to choose from, shows how many
-activities and total distance will be affected, and asks for confirmation
-before writing the update.
-
-```bash
-python tools/activity_replace.py
-```
-
-The tool will prompt you for:
-1. A date range (from / to)
-2. The activity to change **from** (e.g. `trp` — Transport)
-3. The activity to change **to** (e.g. `bus` — Bus)
-4. Confirmation before writing the update
-
-## weather.py
-
-Query the weather table for a date range. For each date prints the temperature
-min/max and top observed conditions, then shows an overall histogram of
-conditions across the range.
-
-```bash
-# Single day.
-python tools/weather.py 2026-04-20
-
-# Date range (inclusive).
-python tools/weather.py 2026-04-01 2026-04-07
-```
-
-With `-v` the tool plots temperature over time using matplotlib — requires
-`pip install matplotlib`. Without `-o` a window is opened; with `-o` the plot
-is saved to the given file (window-less, so it works over SSH too).
-
-```bash
-# Open a plot window.
-python tools/weather.py 2026-04-01 2026-04-07 -v
-
-# Save to a PNG instead.
-python tools/weather.py 2026-04-01 2026-04-07 -v -o april-weather.png
-```
-
-# Using Claude Code
-
-To generate the main code, I used this prompt: "Study CLAUDE.md, and create the discussed scripts in python."
-I think I forgot to add please!
+Time Atlas stores sync data in iCloud. Join the community on
+[Discord](https://discord.gg/zwJEYNdsPE).
